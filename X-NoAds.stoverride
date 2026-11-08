@@ -1,0 +1,27 @@
+name: X 去广告
+desc: 改时间线接口，去掉推广推文、趋势广告和视频贴片。脚本名必须是 x-noads。官方 App 有证书锁定，脚本日志没有 [x-noads] 就是没解开。
+
+# 用法见同目录说明。本覆写不自带脚本正文：
+# Stash「脚本」里新建，名称填 x-noads，类型不用在这里选，把 X-NoAds.js 全部贴进去并打开。
+# 然后再导入这个覆写。两边 name 不一致就不会生效。
+
+http:
+  mitm:
+    - api.x.com
+    - api.twitter.com
+    - x.com
+    - twitter.com
+    - mobile.twitter.com
+  url-rewrite:
+    - '^https?:\/\/(analytics\.twitter\.com|ads-api\.(twitter|x)\.com|ads\.(twitter|x)\.com|ads-bidder-api\.twitter\.com|static\.ads-twitter\.com|ads-twitter\.com)\/ - reject-dict'
+  script:
+    - match: '^https?:\/\/(api\.(x|twitter)\.com|(x|twitter)\.com|mobile\.twitter\.com)\/(i\/api\/|graphql\/|1\.1\/|2\/)'
+      name: x-noads
+      type: request
+      require-body: true
+      timeout: 15
+    - match: '^https?:\/\/(api\.(x|twitter)\.com|(x|twitter)\.com|mobile\.twitter\.com)\/(i\/api\/|graphql\/|1\.1\/|2\/)'
+      name: x-noads
+      type: response
+      require-body: true
+      timeout: 20
