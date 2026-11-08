@@ -1,0 +1,147 @@
+# X网页版广告过滤，兼容修订v2，2026-11-08。
+# 重要：本版缩减为网页版，不是官方X iOS App去广告修复成功版。
+# v1用户反馈：启用后首页与私信失败，停用并重连后恢复。
+# 已确认的设计缺陷：v1将整个api.twitter.com/api.x.com加入MitM；
+# 即使脚本不匹配私信，域名级TLS解密仍会影响该主机上的私信等业务。
+# 证书锁定/解密兼容问题为主要怀疑，尚未取得TLS日志来精确区分原因。
+# v2移除这两个API主机，仅在twitter.com或x.com的/i/api/graphql读取接口过滤广告。
+# 原生App改用其它接口/证书锁定流量时不会生效，不能宣称原生App已去广告。
+#
+# 安装：先停用/删除v1及其它X专用广告覆写，再启用v2并重连Stash。
+# 本版不自动清空或删除其它配置里的MitM列表。
+# 若你只使用官方X App，无需安装此版；保持v1停用即可。
+# 如使用Safari网页版，需Stash3.2.5+及受信任CA；无真机去广告效果保证。
+# 若仍出现加载问题立即停用本版，不要为它重装X或更换CA。
+#
+# 参考字段：Twitter Prime by itsnotlupus (MIT)。下方为独立实现。
+# https://greasyfork.org/en/scripts/474045-twitter-prime/code
+# MitM范围说明：https://stash.wiki/en/http-engine/intro
+# 证书锁定原理：https://docs.mitmproxy.org/stable/concepts/certificates/
+# iOS Twitter历史证书锁定记录：https://github.com/nyathea/twitterlegacypatcher
+#
+# 只移除entries/items数组内带明确推广元数据的条目。
+# 不改用户、会员、发帖、私信、媒体文件或请求头；不设置路由、DNS、UDP拦截。
+# 保留未修改的响应文本、大整数ID与正常条目。
+# 未识别结构、错误、非JSON、超出复杂度/大小限制时原样放行。
+# 日志只记录删除数量，不输出账号与正文；提供记录前隐藏Cookie和Authorization。
+name: X网页版去广告·兼容修订v2
+desc: 仅面向Safari等网页版；移除v1的API域名MitM。官方X App不提供去广告能力。仍未真机验证。
+category: 去广告
+date: '2026-11-08'
+version: 2.0.0
+http:
+  mitm:
+  - twitter.com
+  - x.com
+  script:
+  - match: ^https://(?:twitter\.com|x\.com)/i/api/graphql/[^/?]+/(?:HomeTimeline|HomeLatestTimeline|TweetDetail|TweetDetailMixer|SearchTimeline|UserTweets|UserTweetsAndReplies|ListLatestTweetsTimeline|CommunityTweetsTimeline|CommunityLatestTimeline)(?:\?|$)
+    name: x-web-promoted-filter-local-v2
+    type: response
+    require-body: true
+    timeout: 5
+    max-size: 2097152
+script-providers:
+  x-web-promoted-filter-local-v2:
+    payload: |
+      // Independent Stash implementation; field reference: Twitter Prime by itsnotlupus.
+      // Only removes array elements with explicit promotedMetadata/promoted_metadata.
+      (() => {
+        let output = {};
+        try {
+          const url = $request.url;
+          const target = /^https:\/\/(?:twitter\.com|x\.com)\/i\/api\/graphql\/[^/?]+\/(?:HomeTimeline|HomeLatestTimeline|TweetDetail|TweetDetailMixer|SearchTimeline|UserTweets|UserTweetsAndReplies|ListLatestTweetsTimeline|CommunityTweetsTimeline|CommunityLatestTimeline)(?:\?|$)/;
+          if (!target.test(url)) return;
+          const status = $response.status !== undefined ? $response.status : $response.statusCode;
+          if (status !== undefined && !/^(?:HTTP\/\S+\s+)?2\d\d(?:\s|$)/.test(String(status))) return;
+          const text = $response.body;
+          if (typeof text !== 'string' || !text.trim()) return;
+          // Validate JSON, but never stringify it: retain integer IDs and original text.
+          JSON.parse(text);
+          let pos = 0, nodes = 0, removed = 0;
+          const whitespace = () => { while (pos < text.length && /\s/.test(text[pos])) pos++; };
+          const quoted = () => {
+            const begin = pos++;
+            while (pos < text.length) {
+              if (text[pos] === '\\') { pos += 2; continue; }
+              if (text[pos++] === '"') return text.slice(begin, pos);
+            }
+            throw Error('string');
+          };
+          function parse(depth) {
+            if (depth > 100 || ++nodes > 60000) throw Error('limit');
+            whitespace(); const start = pos, char = text[pos];
+            let node;
+            if (char === '{') {
+              pos++; node = {start, type:'object', fields:Object.create(null)}; whitespace();
+              while (text[pos] !== '}') {
+                const key = JSON.parse(quoted()); whitespace(); pos++; // colon
+                if (Object.prototype.hasOwnProperty.call(node.fields, key)) throw Error('duplicate key');
+                node.fields[key] = parse(depth + 1); whitespace();
+                if (text[pos] !== ',') break;
+                pos++; whitespace();
+              }
+              pos++;
+            } else if (char === '[') {
+              pos++; node = {start, type:'array', children:[]}; whitespace();
+              while (text[pos] !== ']') {
+                node.children.push(parse(depth + 1)); whitespace();
+                if (text[pos] !== ',') break;
+                pos++; whitespace();
+              }
+              pos++;
+            } else if (char === '"') {
+              quoted(); node = {start, type:'string'};
+            } else {
+              while (pos < text.length && !/[,}\]\s]/.test(text[pos])) pos++;
+              node = {start, type:'primitive'};
+            }
+            node.end = pos; return node;
+          }
+          const root = parse(0);
+          const get = (node, key) => node && node.type === 'object' ? node.fields[key] : undefined;
+          function marked(node) {
+            if (!node || node.type !== 'object') return false;
+            for (const key of ['promotedMetadata', 'promoted_metadata']) {
+              const marker = get(node, key);
+              if (marker && !['null','false','0','""'].includes(text.slice(marker.start, marker.end))) return true;
+            }
+            return false;
+          }
+          function advert(node) {
+            // Check only the item wrapper, never quoted/reposted descendants.
+            return marked(node) || marked(get(node,'itemContent')) ||
+              marked(get(get(node,'content'),'itemContent')) || marked(get(get(node,'item'),'itemContent'));
+          }
+          const edits = [];
+          function visit(node, key) {
+            if (node.type === 'object') {
+              for (const field of Object.keys(node.fields)) visit(node.fields[field], field);
+            } else if (node.type === 'array') {
+              const items = node.children;
+              const prune = key === 'entries' || key === 'items';
+              const drop = items.map(item => prune && advert(item));
+              for (let j=0; j<items.length; j++) {
+                if (!drop[j]) { visit(items[j], ''); continue; }
+                const first = j;
+                while (j+1 < items.length && drop[j+1]) j++;
+                removed += j-first+1;
+                if (j+1 < items.length) edits.push([items[first].start, items[j+1].start]);
+                else if (first > 0) edits.push([items[first-1].end, items[j].end]);
+                else edits.push([items[first].start, items[j].end]);
+              }
+            }
+          }
+          visit(root, '');
+          if (!removed) return;
+          edits.sort((a,b) => b[0]-a[0]);
+          let body = text;
+          for (const [start,end] of edits) body = body.slice(0,start) + body.slice(end);
+          JSON.parse(body); // Invalid output falls through unchanged.
+          output = {body};
+          console.log('[XAds] Removed promoted entries/items: ' + removed);
+        } catch (_) {
+          console.log('[XAds] Unrecognized response; unchanged');
+        } finally {
+          $done(output);
+        }
+      })();
