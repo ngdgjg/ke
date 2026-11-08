@@ -1,0 +1,85 @@
+# 美图秀秀 iOS 广告域名拦截，2026-11-08 整理。
+# 测试状态：已验证 YAML 与规则结构；未在用户设备/当前美图版本实测。
+# 本文件不是“已确认最新版全部广告可去除”的承诺。
+#
+# 调研依据与归属：
+# 1. 可莉原作者更新：新版限制 MitM，原插件已移除大部分旧处理。
+#    https://t.me/s/ibilibili/1292
+#    仅参考其公开失效说明，不复制其闭源插件或脚本。
+# 2. blackmatrix7：历史广告入口 adui.tg.meitu.com、mea.meitudata.com/kaiping。
+#    https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rewrite/Stash/AdvertisingLite/AdvertisingLite.stoverride
+# 3. vokins：tg.meitu.com、mea.meitudata.com 等域名拦截记录。
+#    https://raw.githubusercontent.com/vokins/ad/main/ad.lsr
+# 4. anti-AD：推广域名及下方第三方广告域名均在本次下载的列表中出现。
+#    https://raw.githubusercontent.com/privacy-protection-tools/anti-AD/master/anti-ad-domains.txt
+# 5. AdGuard MobileFilter：mi.gdt.qq.com、mobads.baidu.com 广告规则。
+#    https://raw.githubusercontent.com/AdguardTeam/AdguardFilters/master/MobileFilter/sections/adservers.txt
+# 6. 官方 SDK 目录列有穿山甲、腾讯优量汇、快手联盟、百青藤等。
+#    https://pro.meitu.com/xiuxiu/agreements/shared.html?lang=en
+#    目录表明集成关系，不证明每个平台都在你当前 iOS 版本中实际请求。
+#
+# 使用步骤：
+# 1. 停用旧的美图秀秀专用覆写，启用本文件，使用 Stash 的规则模式。
+# 2. 重启 Stash，从后台退出美图后重新打开。
+# 3. 本文件不需要 MitM，不需要重新生成/安装证书。
+#    高德、贝壳仍可使用各自的 MitM；不要为测试美图而全局关闭它们的证书。
+# 4. 本文件不会自动移除其它配置中已有的 *.meitu.com、*.xiuxiu.meitu.com、
+#    api.xiuxiu.meitu.com 等 MitM 项。若出现证书/TLS错误，检查其来源并
+#    单独取消美图相关解密；本文件没有使用 #!replace 清空其它配置。
+# 5. 先不删除重装美图；仍有广告时，先保存正在编辑的内容，再考虑应用内清缓存。
+#
+# 实现选择与边界：
+# - 直接拒绝已知域名连接，不依赖解密，不执行远程 JS，不修改会员状态。
+# - 不封 meitu.com、meitudata.com、qq.com、kuaishou.com 整个主域。
+# - 不加入 corp/message/Android 下载等用途混杂或与本次 iOS 去广告关系不明的域名。
+# - 不加入 api.posters.meitu.com/common/init.json 中删除 data.vip 的旧界面处理：
+#   未确认它能消除当前开屏广告，不推测修改响应字段。
+# - mea.meitudata.com 的 /kaiping 路径有历史依据，本版依据 vokins 的域名记录，
+#   扩大为该单个主机全路径阻断，以避免依赖其 HTTPS 解密。
+#   这是明确的范围扩大：如出现素材加载异常，先注释此主机规则再复测。
+# - 规则中 tg/gg 等也可能承载推广统计；阻断统计不等于移除所有广告。
+# - 第三方广告平台规则对全设备生效，iOS Stash 不能按美图进程限定。
+#   因此其它 App 的同平台广告、激励视频也可能无法加载；如有影响，
+#   可注释整个“第三方广告平台”段，保留上方美图自身规则。
+# - 已缓存的广告、混在业务 API 中的推广、硬编码 IP 请求，可能仍无法阻断。
+# - 本文件不强制改 DNS，不做全球 UDP 443 封锁，不覆盖其它分流配置。
+#
+# 诊断：
+# 清空/记录 Stash 连接列表的起始时间，重现“开屏→选图→保存”中的广告。
+# 查看时间相近的 REJECT 和未拦截连接，而不是只看是否出现 meitu 字样。
+# 将仍有广告的页面、App版本、连接详情提供用于下一次定位。
+# 不需要为本版开启 HTTPS 解密；请隐藏 Cookie、token、设备标识、定位、照片信息。
+#
+name: 美图秀秀去广告·免MitM整合试用版
+desc: 美图推广与开屏素材域名、第三方广告请求拦截；不依赖证书。尚未真机验证，第三方规则也影响其它App广告。
+category: 去广告
+date: '2026-11-08'
+
+rules:
+  # 美图自身：tg 后缀包含已收录的 adui.tg.meitu.com / rabbit.tg.meitu.com。
+  - DOMAIN-SUFFIX,tg.meitu.com,REJECT
+  - DOMAIN,gg.meitu.com,REJECT
+  - DOMAIN,tuiguang.meitu.com,REJECT
+  - DOMAIN,rabbit.mtadvert.com,REJECT
+  # 开屏素材主机，全主机拦截；若素材加载异常，优先注释下面这一行。
+  - DOMAIN,mea.meitudata.com,REJECT
+
+  # 第三方广告平台：下方规则可能同时拦截其它 App 的广告/激励视频。
+  # 腾讯优量汇：anti-AD 的 gdt.qq.com 广告域名族。
+  - DOMAIN-SUFFIX,gdt.qq.com,REJECT
+  # 穿山甲：只加入已被来源逐一收录的广告请求主机，不猜测新域名。
+  - DOMAIN,api-access.pangolin-sdk-toutiao.com,REJECT
+  - DOMAIN,api-access.pangolin-sdk-toutiao-b.com,REJECT
+  - DOMAIN,api-access.pangolin-sdk-toutiao1.com,REJECT
+  - DOMAIN,api-access.pangolin-sdk-toutiao2.com,REJECT
+  - DOMAIN,api-access.pangolin-sdk-toutiao3.com,REJECT
+  - DOMAIN,api-access.pangolin-sdk-toutiao4.com,REJECT
+  - DOMAIN,api-access.pangolin-sdk-toutiao5.com,REJECT
+  - DOMAIN,gromore.pangolin-sdk-toutiao.com,REJECT
+  # 快手联盟：不拦整个快手业务域名。
+  - DOMAIN,open.e.kuaishou.com,REJECT
+  - DOMAIN,api.e.kuaishou.com,REJECT
+  - DOMAIN,api2.e.kuaishou.com,REJECT
+  # 百度百青藤：广告请求及预配置主机。
+  - DOMAIN,mobads.baidu.com,REJECT
+  - DOMAIN,mobads-pre-config.cdn.bcebos.com,REJECT
