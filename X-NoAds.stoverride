@@ -1,9 +1,5 @@
 name: X 去广告
-desc: 改时间线接口，去掉推广推文、趋势广告和视频贴片。脚本名必须是 x-noads。官方 App 有证书锁定，脚本日志没有 [x-noads] 就是没解开。
-
-# 用法见同目录说明。本覆写不自带脚本正文：
-# Stash「脚本」里新建，名称填 x-noads，类型不用在这里选，把 X-NoAds.js 全部贴进去并打开。
-# 然后再导入这个覆写。两边 name 不一致就不会生效。
+desc: 单文件覆写，脚本已内嵌。请先关掉并删掉旧的「X 去广告」，代理恢复后再导入这一份。
 
 http:
   mitm:
@@ -20,8 +16,508 @@ http:
       type: request
       require-body: true
       timeout: 15
+      binary-mode: false
+      max-size: 4194304
     - match: '^https?:\/\/(api\.(x|twitter)\.com|(x|twitter)\.com|mobile\.twitter\.com)\/(i\/api\/|graphql\/|1\.1\/|2\/)'
       name: x-noads
       type: response
       require-body: true
       timeout: 20
+      binary-mode: false
+      max-size: 4194304
+
+script-providers:
+  x-noads:
+    interval: 86400
+    payload: |
+      // X / Twitter 去广告 · Stash 脚本
+      // 脚本名必须是 x-noads，和覆写里的 name 一致。
+      //
+      // 广告不在独立域名上，混在时间线响应里。本脚本做两件事：
+      // 1. 请求：把 variables.includePromotedContent / include_ads 从 true 改成 false
+      // 2. 响应：从 URT 条目里删掉推广，游标（cursor）保留，翻页不受影响
+      //
+      // 依据的是 2026 年仍在用的结构，而不是旧的 DOM「Promoted」文案：
+      // - 入口：api.x.com、api.twitter.com 的 /graphql/<id>/<Op>
+      //         以及网页 x.com/i/api/graphql、/i/api/1.1
+      // - 操作名会轮换，所以不绑死 queryId。命中这些就会扫：
+      //   HomeTimeline / HomeLatestTimeline / TweetDetail / SearchTimeline
+      //   UserTweets / UserTweetsAndReplies / UserMedia / UserOriginalsTimeline
+      //   ListLatestTweetsTimeline / ExploreTimeline / Bookmarks
+      //   NotificationsTimeline / 沉浸式视频
+      // - 条目号：promoted-tweet-<id>、conversationthread-*-promoted-tweet-*
+      //   search-conversation-*-promoted-tweet-*、promoted-trend / account / video
+      // - 字段：itemContent.promotedMetadata、injectionType=PromotedTweet
+      //   PromotedDismissAd / advertiserResults（含 12.37 起的 SSP/RTB）
+      // - 视频贴片：/1.1/videoads/ 、/1.1/promoted_content/
+      //
+      // 不会动：普通推文、引用推文正文、cursor、你自己的 UserPromotedTweets
+      // 想一起去掉「谁关注了谁 / Who to follow」：把 STRIP_WHO_TO_FOLLOW 改成 true
+
+      var STRIP_UPSELL = true;
+      var STRIP_WHO_TO_FOLLOW = false;
+
+      var VIDEO_AD_PATH = /\/1\.1\/videoads\/|\/1\.1\/promoted_content\/|\/i\/api\/2\/ads\b|\/1\.1\/ads\//i;
+      var KEEP_PATH = /\/(UserPromotedTweets|UserPromotableTweets|PromotableTweets|QuickPromoteEligibility)(\?|$|\/)/;
+      var IGNORE_PATH = /\/(jot\/|live_pipeline|account\/|media\/|friendships\/|favorites\/|geo\/|help\/|users\/|device\/|mutes\/|blocks\/|dm\/|direct_messages|media_upload|upload|graphql\/user|statuses\/update|friendships\/)/i;
+
+      var AD_ENTRY_ID = /promoted-tweet|promoted-trend|promoted-account|promoted-video|promoted-media|promoted-user|promotedtweet|promotedtrend|rtb-ad|ssp-ad|google-ad|timeline-ad/i;
+      var UPSELL_ID = /messageprompt|premium-?upsell|signup-footer|inlineprompt|premiumsignup/i;
+      var WHO_ID = /who-?to-?follow|whotofollow/i;
+
+      var SKIP_WALK = {
+        legacy: 1,
+        tweet_results: 1,
+        core: 1,
+        user_results: 1,
+        quoted_status_result: 1,
+        quotedRefResult: 1,
+        entities: 1,
+        extended_entities: 1,
+        card: 1,
+        note_tweet: 1,
+        views: 1,
+        edit_control: 1,
+        birdwatch_pivot: 1,
+        community_results: 1,
+        media: 1,
+        binding_values: 1,
+        globalObjects: 1,
+        users: 1,
+        tweets: 1,
+        full_text: 1
+      };
+
+      function isTrue(v) {
+        return v === true || v === 1 || v === "true";
+      }
+
+      function patchVariables(obj) {
+        if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+        var changed = false;
+        var keys = ["includePromotedContent", "include_promoted_content", "include_ads"];
+        for (var i = 0; i < keys.length; i++) {
+          if (isTrue(obj[keys[i]])) {
+            obj[keys[i]] = false;
+            changed = true;
+          }
+        }
+        return changed;
+      }
+
+      function patchUrlString(url) {
+        if (!url || url.indexOf("includePromoted") === -1 && url.indexOf("include_promoted") === -1 && url.indexOf("include_ads=") === -1) {
+          return null;
+        }
+        var next = url.replace(/([?&])include_ads=true\b/g, "$1include_ads=false");
+        next = next.replace(/([?&])include_promoted_content=true\b/gi, "$1include_promoted_content=false");
+        var m = next.match(/([?&])variables=([^&]*)/);
+        var changed = next !== url;
+        if (!m) return changed ? next : null;
+        var jsonStr;
+        try {
+          jsonStr = decodeURIComponent(m[2]);
+        } catch (e) {
+          return changed ? next : null;
+        }
+        var obj;
+        try {
+          obj = JSON.parse(jsonStr);
+        } catch (e2) {
+          return changed ? next : null;
+        }
+        if (!patchVariables(obj)) return changed ? next : null;
+        var encoded = encodeURIComponent(JSON.stringify(obj));
+        next = next.replace(m[0], m[1] + "variables=" + encoded);
+        return next;
+      }
+
+      function patchBodyString(body) {
+        if (!body || typeof body !== "string") return null;
+        if (body.indexOf("includePromotedContent") === -1 && body.indexOf("include_promoted_content") === -1 && body.indexOf("include_ads") === -1) {
+          return null;
+        }
+        var start = firstJsonChar(body);
+        if (start === 123) {
+          var obj;
+          try {
+            obj = JSON.parse(body);
+          } catch (e) {
+            return null;
+          }
+          var changed = false;
+          if (obj && typeof obj.variables === "string") {
+            try {
+              var inner = JSON.parse(obj.variables);
+              if (patchVariables(inner)) {
+                obj.variables = JSON.stringify(inner);
+                changed = true;
+              }
+            } catch (e2) {}
+          } else if (obj && obj.variables && typeof obj.variables === "object") {
+            if (patchVariables(obj.variables)) changed = true;
+          }
+          if (obj && patchVariables(obj)) changed = true;
+          return changed ? JSON.stringify(obj) : null;
+        }
+        var m = body.match(/(^|&)variables=([^&]*)/);
+        if (!m) {
+          var flipped = body
+            .replace(/(^|&)include_ads=true\b/g, "$1include_ads=false")
+            .replace(/(^|&)include_promoted_content=true\b/gi, "$1include_promoted_content=false");
+          return flipped === body ? null : flipped;
+        }
+        var jsonStr;
+        try {
+          jsonStr = decodeURIComponent(m[2].replace(/\+/g, " "));
+        } catch (e3) {
+          return null;
+        }
+        var vars;
+        try {
+          vars = JSON.parse(jsonStr);
+        } catch (e4) {
+          return null;
+        }
+        if (!patchVariables(vars)) return null;
+        return body.replace(m[0], m[1] + "variables=" + encodeURIComponent(JSON.stringify(vars)));
+      }
+
+      function firstJsonChar(s) {
+        var i = 0;
+        while (i < s.length && s.charCodeAt(i) <= 32) i++;
+        return s.charCodeAt(i);
+      }
+
+      function isCursor(entry) {
+        var id = String((entry && (entry.entryId || entry.entry_id)) || "");
+        if (/cursor/i.test(id)) return true;
+        var c = (entry && (entry.content || entry.item)) || {};
+        var itemType = c.itemContent && c.itemContent.itemType;
+        var blob = String(c.__typename || c.entryType || c.cursorType || itemType || "");
+        return /cursor/i.test(blob);
+      }
+
+      function socialText(entry) {
+        var t =
+          (entry.content && entry.content.socialContext && entry.content.socialContext.text) ||
+          (entry.content && entry.content.itemContent && entry.content.itemContent.socialContext && entry.content.itemContent.socialContext.text) ||
+          (entry.item && entry.item.itemContent && entry.item.itemContent.socialContext && entry.item.itemContent.socialContext.text) ||
+          (entry.item && entry.item.socialContext && entry.item.socialContext.text) ||
+          "";
+        return String(t).trim();
+      }
+
+      function clientBits(entry) {
+        var c =
+          (entry.content && entry.content.clientEventInfo) ||
+          (entry.item && entry.item.clientEventInfo) ||
+          (entry.content && entry.content.itemContent && entry.content.itemContent.clientEventInfo) ||
+          (entry.item && entry.item.itemContent && entry.item.itemContent.clientEventInfo) ||
+          {};
+        var details = c.details || {};
+        var timelines = details.timelinesDetails || {};
+        return {
+          component: String(c.component || ""),
+          element: String(c.element || ""),
+          injection: String(timelines.injectionType || details.injectionType || "")
+        };
+      }
+
+      function hasPromotedMeta(entry) {
+        var spots = [
+          entry.promotedMetadata,
+          entry.promoted_metadata,
+          entry.content && entry.content.promotedMetadata,
+          entry.content && entry.content.promoted_metadata,
+          entry.content && entry.content.itemContent && entry.content.itemContent.promotedMetadata,
+          entry.content && entry.content.itemContent && entry.content.itemContent.promoted_metadata,
+          entry.itemContent && entry.itemContent.promotedMetadata,
+          entry.itemContent && entry.itemContent.promoted_metadata,
+          entry.item && entry.item.itemContent && entry.item.itemContent.promotedMetadata,
+          entry.item && entry.item.itemContent && entry.item.itemContent.promoted_metadata,
+          entry.item && entry.item.content && entry.item.content.itemContent && entry.item.content.itemContent.promotedMetadata,
+          entry.content && entry.content.item && entry.content.item.content && entry.content.item.content.promotedMetadata,
+          entry.content && entry.content.item && entry.content.item.content && entry.content.item.content.tweet && entry.content.item.content.tweet.promotedMetadata
+        ];
+        for (var i = 0; i < spots.length; i++) {
+          if (spots[i]) return true;
+        }
+        return false;
+      }
+
+      function isAdEntry(entry) {
+        if (!entry || typeof entry !== "object") return false;
+        var id = String(entry.entryId || entry.entry_id || "");
+        var itemId = String((entry.item && (entry.item.entryId || entry.item.entry_id)) || "");
+        if (AD_ENTRY_ID.test(id) || AD_ENTRY_ID.test(itemId)) return true;
+        if (STRIP_UPSELL && (UPSELL_ID.test(id) || UPSELL_ID.test(itemId))) return true;
+        if (STRIP_WHO_TO_FOLLOW && (WHO_ID.test(id) || WHO_ID.test(itemId))) return true;
+        if (hasPromotedMeta(entry)) return true;
+
+        var tn = String(
+          (entry.content && (entry.content.__typename || entry.content.entryType)) ||
+            (entry.content && entry.content.itemContent && (entry.content.itemContent.__typename || entry.content.itemContent.itemType || entry.content.itemContent.tweetDisplayType)) ||
+            (entry.item && entry.item.itemContent && (entry.item.itemContent.__typename || entry.item.itemContent.tweetDisplayType)) ||
+            ""
+        );
+        if (/Promoted|MessagePrompt|InlinePrompt/i.test(tn)) {
+          if (/Promoted/i.test(tn)) return true;
+          if (STRIP_UPSELL && /MessagePrompt|InlinePrompt|Premium/i.test(tn)) return true;
+        }
+
+        var bits = clientBits(entry);
+        if (/promoted|ssp|rtb|google|advert/i.test(bits.injection)) return true;
+        if (/promoted|advert/i.test(bits.element)) return true;
+        if (/promoted/i.test(bits.component)) return true;
+
+        var social = socialText(entry);
+        if (social && social.length <= 16 && /^(ad|promoted|sponsored|广告|推广|赞助|プロモーション|プロモツイート|광고)$/i.test(social)) {
+          return true;
+        }
+        return false;
+      }
+
+      function isEmptiedModule(entry) {
+        var c = entry && entry.content;
+        if (!c || typeof c !== "object" || !Array.isArray(c.items)) return false;
+        var tn = String(c.__typename || c.entryType || "");
+        if (tn && !/Module/i.test(tn)) return false;
+        return c.items.length === 0;
+      }
+
+      function cleanEntry(entry, depth, state) {
+        if (!entry || typeof entry !== "object" || depth > 5) return false;
+        var changed = false;
+        var holders = [];
+        if (Array.isArray(entry.items)) holders.push(entry);
+        if (entry.content && Array.isArray(entry.content.items)) holders.push(entry.content);
+        if (entry.item && entry.item.content && Array.isArray(entry.item.content.items)) holders.push(entry.item.content);
+        for (var i = 0; i < holders.length; i++) {
+          var r = stripList(holders[i].items, depth + 1, state);
+          if (r.changed) {
+            holders[i].items = r.list;
+            changed = true;
+          }
+        }
+        return changed;
+      }
+
+      function stripList(list, depth, state) {
+        if (!Array.isArray(list) || depth > 6) return { list: list, changed: false };
+        var out = [];
+        var changed = false;
+        for (var i = 0; i < list.length; i++) {
+          var item = list[i];
+          if (!item || typeof item !== "object") {
+            out.push(item);
+            continue;
+          }
+          if (!isCursor(item) && isAdEntry(item)) {
+            state.stats.removed++;
+            changed = true;
+            continue;
+          }
+          if (cleanEntry(item, depth + 1, state)) changed = true;
+          if (isEmptiedModule(item)) {
+            state.stats.removed++;
+            changed = true;
+            continue;
+          }
+          out.push(item);
+        }
+        return { list: out, changed: changed };
+      }
+
+      function entryLike(arr) {
+        if (!arr || !arr.length) return false;
+        var x = arr[0];
+        return !!(x && typeof x === "object" && (x.entryId || x.entry_id || x.content || x.item));
+      }
+
+      function cleanInstructions(list, state) {
+        if (!Array.isArray(list)) return false;
+        var changed = false;
+        for (var i = list.length - 1; i >= 0; i--) {
+          var ins = list[i];
+          if (!ins || typeof ins !== "object") continue;
+          if (Array.isArray(ins.entries)) {
+            state.seenEntries.add(ins.entries);
+            var r = stripList(ins.entries, 0, state);
+            if (r.changed) {
+              ins.entries = r.list;
+              state.seenEntries.add(ins.entries);
+              changed = true;
+            }
+          }
+          if (ins.addEntries && Array.isArray(ins.addEntries.entries)) {
+            state.seenEntries.add(ins.addEntries.entries);
+            var r2 = stripList(ins.addEntries.entries, 0, state);
+            if (r2.changed) {
+              ins.addEntries.entries = r2.list;
+              state.seenEntries.add(ins.addEntries.entries);
+              changed = true;
+            }
+          }
+          if (ins.entry && typeof ins.entry === "object") {
+            if (!isCursor(ins.entry) && isAdEntry(ins.entry)) {
+              list.splice(i, 1);
+              state.stats.removed++;
+              changed = true;
+              continue;
+            }
+            if (cleanEntry(ins.entry, 0, state)) changed = true;
+            if (isEmptiedModule(ins.entry)) {
+              list.splice(i, 1);
+              state.stats.removed++;
+              changed = true;
+            }
+          }
+          if (ins.replaceEntry && ins.replaceEntry.entry) {
+            var e = ins.replaceEntry.entry;
+            if (!isCursor(e) && isAdEntry(e)) {
+              ins.replaceEntry.entry = null;
+              state.stats.removed++;
+              changed = true;
+            } else if (cleanEntry(e, 0, state)) {
+              changed = true;
+            }
+          }
+          var moduleKey = Array.isArray(ins.moduleItems) ? "moduleItems" : Array.isArray(ins.items) ? "items" : "";
+          if (moduleKey) {
+            var r3 = stripList(ins[moduleKey], 0, state);
+            if (r3.changed) {
+              ins[moduleKey] = r3.list;
+              changed = true;
+            }
+          }
+        }
+        return changed;
+      }
+
+      function walk(node, depth, budget, parentKey, state) {
+        if (!node || typeof node !== "object" || depth > 14 || budget.n > 8000) return;
+        budget.n++;
+        if (Array.isArray(node.instructions) && !state.seenInstr.has(node.instructions)) {
+          state.seenInstr.add(node.instructions);
+          if (cleanInstructions(node.instructions, state)) state.changed = true;
+        }
+        if (Array.isArray(node.entries) && entryLike(node.entries) && !state.seenEntries.has(node.entries)) {
+          state.seenEntries.add(node.entries);
+          var r = stripList(node.entries, 0, state);
+          if (r.changed) {
+            node.entries = r.list;
+            state.seenEntries.add(node.entries);
+            state.changed = true;
+          }
+        }
+        if (Array.isArray(node)) return;
+        var keys = Object.keys(node);
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          if (SKIP_WALK[k]) continue;
+          var v = node[k];
+          if (!v || typeof v !== "object") continue;
+          if (k === "result" && (parentKey === "tweet_results" || parentKey === "user_results" || parentKey === "quoted_status_result")) {
+            continue;
+          }
+          walk(v, depth + 1, budget, k, state);
+        }
+      }
+
+      function filterPayload(root) {
+        var state = {
+          changed: false,
+          seenInstr: new Set(),
+          seenEntries: new Set(),
+          stats: { removed: 0 }
+        };
+        walk(root, 0, { n: 0 }, "", state);
+        return state;
+      }
+
+      function shouldInspectResponse(url, body) {
+        if (KEEP_PATH.test(url)) return false;
+        if (VIDEO_AD_PATH.test(url)) return true;
+        if (IGNORE_PATH.test(url) && url.indexOf("/graphql/") === -1 && url.indexOf("/i/api/") === -1) return false;
+        if (body.indexOf("promoted") === -1 && body.indexOf("Promoted") === -1 && body.indexOf("messageprompt") === -1 && body.indexOf("advertiserResults") === -1 && body.indexOf("promotedMetadata") === -1) {
+          return false;
+        }
+        return true;
+      }
+
+      function handleRequest() {
+        var url = ($request && $request.url) || "";
+        if (!url || KEEP_PATH.test(url)) {
+          $done({});
+          return;
+        }
+        var newUrl = patchUrlString(url);
+        var newBody = patchBodyString($request && $request.body);
+        if (!newUrl && !newBody) {
+          $done({});
+          return;
+        }
+        var out = {};
+        if (newUrl) out.url = newUrl;
+        if (newBody) out.body = newBody;
+        console.log("[x-noads] request includePromotedContent=false");
+        $done(out);
+      }
+
+      function handleResponse() {
+        var url = ($request && $request.url) || "";
+        var body = $response && $response.body;
+        if (typeof body !== "string" || !body) {
+          $done({});
+          return;
+        }
+        if (KEEP_PATH.test(url)) {
+          $done({});
+          return;
+        }
+        if (VIDEO_AD_PATH.test(url)) {
+          console.log("[x-noads] empty video/promoted endpoint");
+          $done({ body: '{"prerolls":[],"data":[],"promoted_content":[]}' });
+          return;
+        }
+        if (!shouldInspectResponse(url, body)) {
+          $done({});
+          return;
+        }
+        if (body.length > 5000000 || (firstJsonChar(body) !== 123 && firstJsonChar(body) !== 91)) {
+          $done({});
+          return;
+        }
+        var json;
+        try {
+          json = JSON.parse(body);
+        } catch (e) {
+          $done({});
+          return;
+        }
+        var state = filterPayload(json);
+        if (!state.changed || !state.stats.removed) {
+          $done({});
+          return;
+        }
+        var tail = url.replace(/^https?:\/\/[^/]+/, "");
+        if (tail.length > 90) tail = tail.slice(0, 90);
+        console.log("[x-noads] removed " + state.stats.removed + " " + tail);
+        $done({ body: JSON.stringify(json) });
+      }
+
+      function main() {
+        try {
+          var responding = typeof $response !== "undefined" && $response && typeof $response.body === "string";
+          if (responding) handleResponse();
+          else handleRequest();
+        } catch (e) {
+          console.log("[x-noads] " + (e && e.message ? e.message : e));
+          $done({});
+        }
+      }
+
+      if (typeof $request !== "undefined" || typeof $response !== "undefined") {
+        main();
+      }
