@@ -1,0 +1,25 @@
+# Amap iOS splash-ad-only Stash override
+# Researched 2026-11-02. Only the two documented splash-screen API families.
+# Sources:
+# https://raw.githubusercontent.com/ddgksf2013/Rewrite/refs/heads/master/AdBlock/AmapAds.conf
+# https://github.com/blackmatrix7/ios_rule_script/blob/master/rewrite/Surge/Advertising/Advertising.sgmodule
+# https://clashios.app/stoverride/lodepuly_vpn_tool/Amap_remove_ads
+# Stash syntax: https://stash.wiki/http-engine/rewrite
+# Notes: Does NOT modify proxies, proxy groups, DNS or routing rules.
+# Does NOT block startup/init, broad valueadded APIs, or image/CDN hosts.
+# HTTPS rewriting requires Stash MitM with your own trusted CA.
+name: '高德地图开屏去广告｜专项精简版'
+desc: '仅拦截高德地图公开规则中两类开屏广告请求，不改分流及地图导航功能。'
+category: '去广告'
+http:
+  mitm:
+    - m5.amap.com
+    - m5-zb.amap.com
+    - center.amap.com
+    - ai.amap.com
+    - amap-aos-info-nogw.amap.com
+  url-rewrite:
+    # Later documented AOS splash endpoint (ddgksf2013, 2025-12-06)
+    - '^https?://(?:m5|m5-zb|center|ai|amap-aos-info-nogw)\.amap\.com/ws/aos/alimama/splash_screen(?:[/?#]|$) - reject-200'
+    # Legacy valueadded splash endpoint (Lodepuly / Blackmatrix7)
+    - '^https?://(?:m5|m5-zb|center|ai|amap-aos-info-nogw)\.amap\.com/ws/valueadded/alimama/splash_screen(?:[/?#]|$) - reject-dict'
