@@ -1,0 +1,145 @@
+# 微信 iOS 公众号与部分小程序广告，2026-11-08，修订 v2。
+# v2：补充历史公众号规则的两个精确素材主机，并增强脚本目标/状态检查。
+# 新增主机仍需真机验证；它们也可能承载正常素材，图片缺失时先注释新增两行。
+# 历史主机来源：https://clashios.app/stoverride/lodepuly_vpn_tool/Weixin_Official_Accounts_remove_ads
+# 深入核对的程序资料：
+# https://github.com/pwnless/WechatNoAds/blob/main/Tweak.x
+# https://github.com/duzexu/WeChatHelper/blob/master/WeChatHeader/wechat/SnsTimeLineResponse.h
+# https://github.com/citizenlab/wechat-security-report
+# 上述内部方法与MMTLS资料未提供可直接移植到Stash的朋友圈/视频号新规则。
+# 尚未真机验证；不承诺朋友圈、视频号或所有小程序广告清除。
+# 参考：
+# Choler / NobyDa：公众号 getappmsgad 及顶层广告字段线索。
+# https://github.com/NobyDa/Script/blob/master/QuantumultX/File/Wechat.js
+# Belcheck：兼容性说明及两个精确广告素材主机；脚本在下方独立实现。
+# https://github.com/belcheckyoung/Belcheck-QX-AdBlock/blob/main/Docs/WeChatAdClean.md
+# https://raw.githubusercontent.com/belcheckyoung/Belcheck-QX-AdBlock/main/Filters/WeChatMiniProgramAds.list
+# 墨鱼旧规则：公众号图文处理；其主页已划除旧专用模块且注明不能去朋友圈广告。
+# https://raw.githubusercontent.com/ddgksf2013/Rewrite/master/AdBlock/Applet.conf
+# https://github.com/ddgksf2013/ddgksf2013
+# Stash 语法：https://stash.wiki/script/manage-script
+#
+# 需要 Stash iOS 3.2.5+（内嵌脚本）。无需远程下载 JS。
+# 启用后使用规则模式，重启 Stash，再退出并重开微信，测试未缓存的文章。
+# 公众号处理需要启用 MitM，并完全信任 Stash 当前 CA。
+# 四条精确素材 DOMAIN 规则不需要 MitM。
+# 原有公众号 getappmsgad 重写请先停用，避免同一路径重复处理。
+# 不要为测试删除/重装微信、清聊天记录或重新生成已有受信任证书。
+#
+# 边界与排查：
+# - 不拦整个 wxs.qq.com / weixin.qq.com / qq.com，也不添加这些通配 MitM。
+# - 不拦 MMTLS 业务通道，不做聊天、支付、登录、联系人或用户数据改写。
+# - 四个素材主机的其它内容也会被阻断；若图片缺失，先停用新增两行复测。
+# - 素材被阻断后，广告容器/黑屏/倒计时仍可能存在，激励奖励可能不发放。
+# - 不修改小程序奖励状态；不加入未经确认的朋友圈/视频号接口。
+# - 对 getappmsgad 仅处理已知成功 JSON 的顶层 advertisement_num 与
+#   advertisement_info；未知结构和错误响应保持原样，保留 appid。
+# - 文本局部替换避免重新序列化其它字段，保留大整数、空白和原始转义。
+# - 若公众号依旧有广告：查看是否请求 /mp/getappmsgad 且可被解密。
+#   没有命中可能是缓存或接口变化，不代表配置必然无效。
+# - 登录/支付/文章异常先停用本覆写比较；已有其它规则仍可能造成影响。
+# - 提供诊断记录时隐藏文章账号参数、Cookie、token、聊天和支付内容。
+
+name: 微信公众号与小程序去广告·修订v2
+desc: 公众号接口清理与4个精确素材主机；新增历史主机未经真机验证。未覆盖朋友圈/视频号；需Stash3.2.5+及公众号MitM。
+category: 去广告
+date: '2026-11-08'
+version: '2.0.0'
+
+rules:
+  - DOMAIN,wxsmw.wxs.qq.com,REJECT
+  - DOMAIN,wximg.wxs.qq.com,REJECT
+  # v2新增：历史规则收录，素材缺失时优先停用这两条。
+  - DOMAIN,wxsnsdy.wxs.qq.com,REJECT
+  - DOMAIN,wxsnsdythumb.wxs.qq.com,REJECT
+
+http:
+  mitm:
+    - mp.weixin.qq.com
+  force-http-engine:
+    - 'mp.weixin.qq.com:80'
+  script:
+    - match: '^https?://mp\.weixin\.qq\.com(?::(?:80|443))?/mp/getappmsgad(?:\?[^#]*)?$'
+      name: wechat-article-ad-local-v2
+      type: response
+      require-body: true
+      timeout: 5
+      max-size: 2097152
+
+script-providers:
+  wechat-article-ad-local-v2:
+    payload: |
+      // Independent local implementation. No network or personal-data logging.
+      (() => {
+        let output = {};
+        try {
+          if (!/^https?:\/\/mp\.weixin\.qq\.com(?::(?:80|443))?\/mp\/getappmsgad(?:\?[^#]*)?$/.test($request.url)) return;
+          // Stash exposes status; alternate runtimes may expose statusCode.
+          const status = $response.status !== undefined ? $response.status : $response.statusCode;
+          if (status !== undefined) {
+            const match = String(status).match(/^(?:HTTP\/\S+\s+)?(\d{3})(?:\s|$)/);
+            if (!match || Number(match[1]) < 200 || Number(match[1]) >= 300) return;
+          }
+          const text = $response.body;
+          if (typeof text !== 'string') return;
+          const root = JSON.parse(text);
+          const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+          if (!root || typeof root !== 'object' || Array.isArray(root)) return;
+          if (has(root, 'ret') && root.ret !== 0) return;
+          if (has(root, 'base_resp') && (!root.base_resp || root.base_resp.ret !== 0)) return;
+          if (!Number.isSafeInteger(root.advertisement_num) || root.advertisement_num < 0 ||
+              !Array.isArray(root.advertisement_info)) return;
+          // Parse root property spans; JSON.parse above validates the syntax.
+          let i = 0;
+          const space = () => { while (/\s/.test(text[i] || '') && i < text.length) i++; };
+          const string = () => {
+            const begin = i++;
+            while (i < text.length) {
+              if (text[i] === '\\') { i += 2; continue; }
+              if (text[i++] === '"') return text.slice(begin, i);
+            }
+            throw Error('string');
+          };
+          const value = () => {
+            if (text[i] === '"') { string(); return; }
+            if (text[i] === '{' || text[i] === '[') {
+              let depth = 0;
+              do {
+                if (text[i] === '"') { string(); continue; }
+                if (text[i] === '{' || text[i] === '[') depth++;
+                if (text[i] === '}' || text[i] === ']') depth--;
+                i++;
+              } while (depth && i < text.length);
+              return;
+            }
+            while (i < text.length && !/[,}\s]/.test(text[i])) i++;
+          };
+          space(); if (text[i++] !== '{') return;
+          const seen = new Set();
+          const edits = [];
+          for (;;) {
+            space(); if (text[i] === '}') break;
+            if (text[i] !== '"') return;
+            const key = JSON.parse(string());
+            if (seen.has(key)) return;
+            seen.add(key); space(); if (text[i++] !== ':') return;
+            space(); const begin = i; value(); const end = i;
+            if (key === 'advertisement_num' || key === 'advertisement_info') {
+              edits.push({begin, end, replacement: key === 'advertisement_num' ? '0' : '[]'});
+            }
+            space(); if (text[i] === '}') break;
+            if (text[i++] !== ',') return;
+          }
+          if (edits.length !== 2) return;
+          let body = text;
+          edits.sort((a, b) => b.begin - a.begin).forEach(e => {
+            body = body.slice(0, e.begin) + e.replacement + body.slice(e.end);
+          });
+          output = {body};
+          console.log('[WeChatAds] Known article ad fields cleared');
+        } catch (_) {
+          console.log('[WeChatAds] Unrecognized response; unchanged');
+        } finally {
+          $done(output);
+        }
+      })();
