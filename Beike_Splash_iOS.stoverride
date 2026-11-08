@@ -1,0 +1,52 @@
+# 贝壳找房 iOS 开屏广告；整理日期 2026-11-08。
+# 状态：依据公开历史规则整合，未在最新版贝壳和用户设备上抓包实测。
+# 来源：blackmatrix7/ios_rule_script 与 Crazy-Z7/AdGuard（原注作者 @Zoo）。
+# https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rewrite/Stash/AdvertisingLite/AdvertisingLite.stoverride
+# https://raw.githubusercontent.com/Crazy-Z7/AdGuard/main/Ad.conf
+# 文档：https://stash.wiki/http-engine/rewrite
+#
+# 使用：导入为 Stash 覆写并启用，重新启动 Stash，再强制退出并重开贝壳。
+# MitM 必须启用；iOS 必须完全信任 Stash 当前使用的 CA。
+# 无远程脚本依赖，无 CA 内容，不替换其它覆写或用户证书。
+# 可与高德专用覆写同时启用；测试时停用其它贝壳专用覆写避免重复匹配。
+#
+# bootpage 为公开规则标注的开屏接口。
+# getactivityconfig 同样被公开规则收录，但未经当前版本响应验证，
+# 可能同时影响正常活动展示；若出现活动功能异常，注释对应一行后重试。
+# 不封整个 ke.com / ljcdn.com，不猜测未验证的新接口或响应字段。
+#
+# UDP 443 规则仅限定这两个 API 主机，用于尝试让 QUIC 回落到 TCP。
+# 此回落策略属于整合补充，不能保证客户端一定回落；如贝壳连接异常，
+# 先注释下方两条 AND 规则再重启 Stash。
+#
+# 无效时：在 Stash 连接/HTTP 请求记录中查找 app.api.ke.com、
+# apps.api.ke.com、bootpage、getactivityconfig。
+# 只有域名而无 HTTPS 路径时，先检查 MitM、证书和流量是否经过 Stash。
+# 如发生 TLS/证书校验错误，停用本覆写恢复后再诊断，避免反复重装 App。
+# 能看到路径但没有这些接口时，需根据实际开屏请求补充规则。
+# URL 被拦仍有广告时，可能存在本地缓存、其它入口或客户端内置展示逻辑。
+# 先应用内清缓存；不要求一开始就删除重装。
+# 分享记录前隐藏 Cookie、Authorization、token、手机号、设备标识和定位信息。
+
+name: 贝壳找房开屏拦截·整合试用版
+desc: 覆盖app与apps双域名的已知开屏入口及活动配置；需MitM和受信任CA，尚未真机验证。
+category: 去广告
+date: '2026-11-08'
+
+rules:
+  - 'AND,((DOMAIN,app.api.ke.com),(NETWORK,UDP),(DST-PORT,443)),REJECT'
+  - 'AND,((DOMAIN,apps.api.ke.com),(NETWORK,UDP),(DST-PORT,443)),REJECT'
+
+http:
+  mitm:
+    - app.api.ke.com
+    - apps.api.ke.com
+  force-http-engine:
+    - 'app.api.ke.com:80'
+    - 'apps.api.ke.com:80'
+  url-rewrite:
+    # 两个来源中出现的开屏入口，保留其 reject-200 处理思路。
+    - '^https?://apps?\.api\.ke\.com(?::(?:80|443))?/config/config/bootpage(?:/|\?|$) - reject-200'
+    # 仅限来源明确列出的 apps 域名，避免推测性扩大。
+    # 若正常活动展示异常，可注释下一行。
+    - '^https?://apps\.api\.ke\.com(?::(?:80|443))?/config/config/getactivityconfig(?:/|\?|$) - reject-200'
