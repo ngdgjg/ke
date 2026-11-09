@@ -1,0 +1,96 @@
+# 高德地图开屏广告整合修订版；更新日期 2026-11-09
+# 修复：用户实测出现 /ws/aos/alimama/splash_screen_rt；v1 路径边界漏匹配 _rt。
+# v1.1 同时匹配 splash_screen 与 splash_screen_rt，保留路径边界。
+# 已验证 URL 匹配；未在用户设备验证广告展示效果。
+# Requires Stash iOS 3.2.5+ (inline script-providers.payload).
+# 未在用户设备实测；规则存在不代表新版 App 必然请求这些接口。
+# 来源（接口参考，脚本为本文件独立实现）：
+# ddgksf2013: https://raw.githubusercontent.com/ddgksf2013/Rewrite/master/AdBlock/AmapAds.conf
+# ddgksf2013: https://github.com/ddgksf2013/Scripts/blob/master/amap.js
+# blackmatrix7: https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rewrite/Stash/AdvertisingLite/AdvertisingLite.stoverride
+# 对比旧 Stash 版本：https://clashios.app/stoverride/lodepuly_vpn_tool/Amap_remove_ads
+# 文档：https://stash.wiki/script/manage-script
+#
+# 使用：保存到「文件」后导入 Stash 覆写，启用并重新启动 Stash。
+# 测试时停用其他专门针对高德的覆写，避免它们先截走同一接口。
+# 必须启用 MitM，安装并完全信任 Stash 当前正在使用的 CA。
+# 证书信任路径：iOS 设置 > 通用 > 关于本机 > 证书信任设置。
+# 本文件不包含 CA，也不会替换用户的 CA。
+# 先强制退出高德再打开，保持规则开启，间隔一段时间复测。
+# 清除高德应用内缓存后仍出现时，旧规则作者建议删除应用并重装；
+# 这是可选步骤，会影响本地离线地图/设置，先确认已同步所需资料。
+# 「卸载 App」会保留文稿与数据，不等同于「删除 App」。
+#
+# 诊断：Stash 连接/请求记录搜索 splash_screen、startup/init、optimus-ads。
+# 能看见完整 HTTPS 路径，才说明相应请求进入了 MitM。
+# 没有路径：先查 MitM/证书/请求是否经过 Stash，不能据此认定接口失效。
+# 有路径但广告仍显示：可能是本地缓存或新增接口；需脱敏请求记录继续定位。
+# 脱敏时删除定位坐标、Cookie、token、设备标识和查询参数中的个人信息。
+# 已缓存广告不一定产生新请求，网络覆写不能直接删除 App 本地广告文件。
+# UDP 443 规则仅对列出的 API 主机和素材主机生效，目的是尝试回落 TCP；
+# 若出现连接异常，可先注释下面两条 AND 规则再重新启动 Stash。
+# 这些主机可能也服务其他高德功能；它们的 TCP 业务仍按原配置路由。
+#
+name: 高德开屏广告拦截·实时接口修订v1.1
+desc: 补齐截图确认的 splash_screen_rt 实时开屏接口；保留原开屏规则。需MitM与受信任CA；已验证URL匹配，尚待真机复测。
+category: 去广告
+date: '2026-11-09'
+version: '1.1.0'
+
+rules:
+  - 'AND,((DOMAIN-REGEX,^(m[0-9]+(-[a-z0-9-]+)?|center|amap-aos-info-nogw)\.amap\.com$),(NETWORK,UDP),(DST-PORT,443)),REJECT'
+  - 'AND,((DOMAIN,optimus-ads.amap.com),(NETWORK,UDP),(DST-PORT,443)),REJECT'
+
+http:
+  mitm:
+    - 'm*.amap.com'
+    - center.amap.com
+    - amap-aos-info-nogw.amap.com
+    - optimus-ads.amap.com
+  force-http-engine:
+    - 'm*.amap.com:80'
+    - 'center.amap.com:80'
+    - 'amap-aos-info-nogw.amap.com:80'
+    - 'optimus-ads.amap.com:80'
+    - 'amdc.m.taobao.com:80'
+  url-rewrite:
+    # 墨鱼配置中新增的 aos 开屏入口：覆盖有/无尾部斜杠、有/无查询参数。
+    - '^https?://(?:m[0-9]+(?:-[a-z0-9-]+)?|center|amap-aos-info-nogw)\.amap\.com(?::(?:80|443))?/ws/aos/alimama/splash_screen(?:_rt)?(?:/|\?|$) - reject-200'
+    # blackmatrix7 收录的启动广告初始化。整合版改用空 JSON 响应。
+    - '^https?://m[0-9]+(?:-[a-z0-9-]+)?\.amap\.com(?::(?:80|443))?/ws/shield/dsp/app/startup/init(?:/|\?|$) - reject-dict'
+    # 仅拦广告素材目录，不封整站。
+    - '^https?://optimus-ads\.amap\.com(?::(?:80|443))?/uploadimg/ - reject-200'
+    # blackmatrix7 收录的高德 appkey 调度请求；不扩大到全部淘宝调度。
+    # 仅覆盖原规则有证据的 HTTP 场景；HTTPS 调度未在此启用 MitM。
+    - '^http://amdc\.m\.taobao\.com(?::80)?/amdc/mobileDispatch\?(?:[^#&]*&)*appkey=23782110(?:&|$) - reject'
+  script:
+    # valueadded 开屏响应：保留其它响应元数据，仅清空已知 data.ad 列表。
+    - match: '^https?://(?:m[0-9]+(?:-[a-z0-9-]+)?|center|amap-aos-info-nogw)\.amap\.com(?::(?:80|443))?/ws/valueadded/alimama/splash_screen(?:/|\?|$)'
+      name: amap-splash-local-v1
+      type: response
+      require-body: true
+      timeout: 5
+      max-size: 2097152
+
+script-providers:
+  amap-splash-local-v1:
+    payload: |
+      // Independent implementation for the known splash response schema.
+      // No network calls, remote dependencies, or request-body logging.
+      (() => {
+        try {
+          const obj = JSON.parse($response.body);
+          if (obj && obj.data && Array.isArray(obj.data.ad)) {
+            const count = obj.data.ad.length;
+            obj.data.ad = [];
+            console.log('[AmapSplash] data.ad cleared: ' + count);
+            $done({body: JSON.stringify(obj)});
+          } else {
+            console.log('[AmapSplash] Unrecognized schema; response unchanged');
+            $done({});
+          }
+        } catch (_) {
+          console.log('[AmapSplash] Non-JSON response; unchanged');
+          $done({});
+        }
+      })();
